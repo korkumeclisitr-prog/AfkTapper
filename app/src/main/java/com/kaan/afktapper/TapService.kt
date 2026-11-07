@@ -2,14 +2,19 @@ package com.kaan.afktapper
 
 import android.accessibilityservice.AccessibilityService
 import android.accessibilityservice.GestureDescription
+import android.annotation.TargetApi
 import android.content.Context
 import android.content.Intent
+import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.Path
 import android.graphics.PixelFormat
 import android.graphics.drawable.GradientDrawable
+import android.os.Build
 import android.os.Handler
 import android.os.Looper
+import android.text.TextUtils
+import android.view.Display
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -18,10 +23,12 @@ import android.view.accessibility.AccessibilityEvent
 import android.widget.LinearLayout
 import android.widget.TextView
 import android.widget.Toast
+import java.util.concurrent.Executors
 
 /**
- * Erişilebilirlik servisi: ekranda sürüklenebilir numaralı daireler ve küçük bir kontrol
- * paneli gösterir. Başlatılınca daireleri sırayla, belirlenen aralıkla "dokunur".
+ * Erişilebilirlik servisi. İki mod:
+ *  - Sabit noktalar: sürüklenebilir numaralı daireleri sırayla, belirlenen aralıkla "dokunur".
+ *  - AI modu: her adımda ekran görüntüsü alır, Gemini'ye gönderir, dönen hamleyi uygular.
  * TYPE_ACCESSIBILITY_OVERLAY kullanıldığı için ayrıca "üstte göster" izni gerekmez.
  */
 class TapService : AccessibilityService() {
@@ -32,17 +39,34 @@ class TapService : AccessibilityService() {
         const val PREFS = "afk"
         const val KEY_INTERVAL = "interval"
         const val KEY_MINUTES = "minutes"
+        const val KEY_MODE = "mode"          // "points" | "ai"
+        const val KEY_API = "api_key"
+        const val KEY_MODEL = "model"
+        const val KEY_GOAL = "goal"
+        const val KEY_STEP = "step_ms"
+        const val DEFAULT_MODEL = "gemini-3.6-flash"
     }
 
     private val handler = Handler(Looper.getMainLooper())
     private var wm: WindowManager? = null
     private var panel: LinearLayout? = null
     private var playBtn: TextView? = null
+    private var statusText: TextView? = null
     private val points = mutableListOf<TextView>()
     private var running = false
+    private var aiMode = false
     private var idx = 0
 
+    // AI modu
+    private val worker = Executors.newSingleThreadExecutor()
+    private val aiHistory = ArrayList<String>()
+    private var aiErrors = 0
+    private var session = 0
+
     private val tickRunnable = Runnable { tick() }
+    private val aiRunnable = Runnable {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) aiStep()
+    }
     private val autoStopRunnable = Runnable {
         stopTapping()
         Toast.makeText(this, "Süre doldu, durduruldu.", Toast.LENGTH_SHORT).show()
@@ -70,11 +94,14 @@ class TapService : AccessibilityService() {
 
     override fun onDestroy() {
         hidePanel()
+        worker.shutdownNow()
         instance = null
         super.onDestroy()
     }
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    private fun prefs() = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 
     private fun params(w: Int, h: Int, x: Int, y: Int) = WindowManager.LayoutParams(
         w, h,
@@ -114,10 +141,10 @@ class TapService : AccessibilityService() {
     fun showPanel() {
         if (panel != null) return
         val manager = wm ?: return
+        aiMode = prefs().getString(KEY_MODE, "points") == "ai"
 
-        val bar = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-            gravity = Gravity.CENTER_VERTICAL
+        val container = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
             background = GradientDrawable().apply {
                 cornerRadius = dp(24).toFloat()
                 setColor(0xE6202030.toInt())
@@ -125,8 +152,13 @@ class TapService : AccessibilityService() {
             setPadding(dp(6), dp(4), dp(6), dp(4))
         }
 
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
         val handle = barButton("☰")
-        makeDraggable(handle, bar)
+        makeDraggable(handle, container)
         bar.addView(handle)
 
         val play = barButton("▶")
@@ -134,26 +166,42 @@ class TapService : AccessibilityService() {
         playBtn = play
         bar.addView(play)
 
-        val add = barButton("＋")
-        add.setOnClickListener { addPoint() }
-        bar.addView(add)
+        if (!aiMode) {
+            val add = barButton("＋")
+            add.setOnClickListener { addPoint() }
+            bar.addView(add)
 
-        val remove = barButton("－")
-        remove.setOnClickListener { removePoint() }
-        bar.addView(remove)
+            val remove = barButton("－")
+            remove.setOnClickListener { removePoint() }
+            bar.addView(remove)
+        }
 
         val close = barButton("✕")
         close.setOnClickListener { hidePanel() }
         bar.addView(close)
+        container.addView(bar)
+
+        val st = TextView(this).apply {
+            textSize = 11f
+            setTextColor(0xFFCCCCDD.toInt())
+            maxLines = 2
+            ellipsize = TextUtils.TruncateAt.END
+            maxWidth = dp(240)
+            setPadding(dp(8), 0, dp(8), dp(4))
+            text = "Hazır. ▶ ile başlat."
+            visibility = if (aiMode) View.VISIBLE else View.GONE
+        }
+        container.addView(st)
+        statusText = st
 
         val m = resources.displayMetrics
-        manager.addView(bar, params(
+        manager.addView(container, params(
             WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.WRAP_CONTENT,
             m.widthPixels / 2 - dp(120), dp(80)
         ))
-        panel = bar
-        addPoint()
+        panel = container
+        if (!aiMode) addPoint()
     }
 
     private fun barButton(label: String) = TextView(this).apply {
@@ -165,6 +213,10 @@ class TapService : AccessibilityService() {
         minHeight = dp(44)
     }
 
+    private fun setStatus(s: String) {
+        statusText?.text = s
+    }
+
     fun hidePanel() {
         stopTapping()
         val manager = wm
@@ -173,6 +225,7 @@ class TapService : AccessibilityService() {
         panel?.let { runCatching { manager?.removeView(it) } }
         panel = null
         playBtn = null
+        statusText = null
     }
 
     // ---------- Noktalar ----------
@@ -228,10 +281,19 @@ class TapService : AccessibilityService() {
         }
     }
 
-    // ---------- Tıklama döngüsü ----------
+    // ---------- Başlat / durdur ----------
+
+    private fun scheduleAutoStop() {
+        val minutes = prefs().getLong(KEY_MINUTES, 0L)
+        if (minutes > 0) handler.postDelayed(autoStopRunnable, minutes * 60_000L)
+    }
 
     private fun startTapping() {
         if (running) return
+        if (aiMode) {
+            startAi()
+            return
+        }
         if (points.isEmpty()) {
             Toast.makeText(this, "Önce ＋ ile nokta ekle.", Toast.LENGTH_SHORT).show()
             return
@@ -240,22 +302,24 @@ class TapService : AccessibilityService() {
         idx = 0
         playBtn?.text = "⏸"
         setPointsTouchable(false)
-
-        val prefs = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-        val minutes = prefs.getLong(KEY_MINUTES, 0L)
-        if (minutes > 0) handler.postDelayed(autoStopRunnable, minutes * 60_000L)
-
+        scheduleAutoStop()
         handler.post(tickRunnable)
     }
 
     private fun stopTapping() {
         if (!running) return
         running = false
+        session++
         handler.removeCallbacks(tickRunnable)
+        handler.removeCallbacks(aiRunnable)
         handler.removeCallbacks(autoStopRunnable)
+        panel?.visibility = View.VISIBLE
         playBtn?.text = "▶"
         setPointsTouchable(true)
+        if (aiMode) setStatus("Durduruldu.")
     }
+
+    // ---------- Sabit nokta döngüsü ----------
 
     private fun tick() {
         if (!running) return
@@ -263,8 +327,7 @@ class TapService : AccessibilityService() {
             stopTapping()
             return
         }
-        val interval = getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-            .getLong(KEY_INTERVAL, 500L).coerceAtLeast(50L)
+        val interval = prefs().getLong(KEY_INTERVAL, 500L).coerceAtLeast(50L)
 
         val v = points[idx % points.size]
         idx++
@@ -279,6 +342,157 @@ class TapService : AccessibilityService() {
             .build()
 
         val next = Runnable { handler.postDelayed(tickRunnable, interval) }
+        val ok = dispatchGesture(gesture, object : GestureResultCallback() {
+            override fun onCompleted(g: GestureDescription?) {
+                next.run()
+            }
+
+            override fun onCancelled(g: GestureDescription?) {
+                next.run()
+            }
+        }, null)
+        if (!ok) next.run()
+    }
+
+    // ---------- AI modu ----------
+
+    private fun startAi() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.R) {
+            Toast.makeText(this, "AI modu Android 11 veya üstü gerektirir.", Toast.LENGTH_LONG).show()
+            return
+        }
+        if (prefs().getString(KEY_API, "").isNullOrBlank()) {
+            Toast.makeText(this, "Önce ana ekrandan Gemini API anahtarını gir.", Toast.LENGTH_LONG).show()
+            return
+        }
+        running = true
+        session++
+        aiHistory.clear()
+        aiErrors = 0
+        playBtn?.text = "⏸"
+        setStatus("Başlıyor…")
+        scheduleAutoStop()
+        handler.post(aiRunnable)
+    }
+
+    private fun stepDelay() = prefs().getLong(KEY_STEP, 1500L).coerceAtLeast(800L)
+
+    private fun scheduleNextAi() {
+        if (running) handler.postDelayed(aiRunnable, stepDelay())
+    }
+
+    @TargetApi(Build.VERSION_CODES.R)
+    private fun aiStep() {
+        if (!running) return
+        val mySession = session
+        // Paneli ekran görüntüsünde göstermemek için kısa süre gizle.
+        panel?.visibility = View.INVISIBLE
+        handler.postDelayed({
+            if (!running || mySession != session) {
+                panel?.visibility = View.VISIBLE
+                return@postDelayed
+            }
+            takeScreenshot(
+                Display.DEFAULT_DISPLAY,
+                mainExecutor,
+                object : AccessibilityService.TakeScreenshotCallback {
+                    override fun onSuccess(result: AccessibilityService.ScreenshotResult) {
+                        panel?.visibility = View.VISIBLE
+                        val buffer = result.hardwareBuffer
+                        val hw = Bitmap.wrapHardwareBuffer(buffer, result.colorSpace)
+                        val bmp = hw?.copy(Bitmap.Config.ARGB_8888, false)
+                        buffer.close()
+                        hw?.recycle()
+                        if (bmp == null) {
+                            aiFail("Ekran görüntüsü okunamadı", false, 5000L)
+                        } else {
+                            callGemini(bmp, mySession)
+                        }
+                    }
+
+                    override fun onFailure(errorCode: Int) {
+                        panel?.visibility = View.VISIBLE
+                        aiFail("Ekran görüntüsü alınamadı (kod $errorCode)", false, 3000L)
+                    }
+                }
+            )
+        }, 150L)
+    }
+
+    private fun callGemini(bmp: Bitmap, mySession: Int) {
+        val p = prefs()
+        val key = p.getString(KEY_API, "").orEmpty().trim()
+        val model = p.getString(KEY_MODEL, DEFAULT_MODEL).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
+        val goal = p.getString(KEY_GOAL, "").orEmpty().trim()
+            .ifEmpty { "Progress in the game: complete objectives, collect rewards, fight enemies." }
+        val history = aiHistory.toList()
+        val w = bmp.width
+        val h = bmp.height
+        setStatus("Gemini düşünüyor…")
+
+        worker.execute {
+            val result = runCatching { GeminiClient.nextAction(key, model, goal, history, bmp) }
+            bmp.recycle()
+            handler.post { handleAiResult(result, w, h, mySession) }
+        }
+    }
+
+    private fun handleAiResult(result: Result<AiAction>, w: Int, h: Int, mySession: Int) {
+        if (!running || mySession != session) return
+        val err = result.exceptionOrNull()
+        if (err != null) {
+            val ge = err as? GeminiException
+            val msg = ge?.message ?: ("Ağ hatası: " + (err.message ?: err.javaClass.simpleName))
+            val fatal = ge != null && ge.code in intArrayOf(400, 401, 403, 404)
+            aiFail(msg, fatal, if (ge?.code == 429) 12_000L else 5_000L)
+            return
+        }
+        aiErrors = 0
+        performAi(result.getOrThrow(), w, h, mySession)
+    }
+
+    private fun aiFail(msg: String, fatal: Boolean, retryDelay: Long) {
+        aiErrors++
+        if (fatal || aiErrors >= 3) {
+            stopTapping()
+            setStatus(msg)
+            Toast.makeText(this, msg, Toast.LENGTH_LONG).show()
+            return
+        }
+        setStatus("$msg — tekrar denenecek")
+        if (running) handler.postDelayed(aiRunnable, retryDelay)
+    }
+
+    private fun performAi(a: AiAction, w: Int, h: Int, mySession: Int) {
+        val x = a.x.coerceIn(0, 1000) / 1000f * w
+        val y = a.y.coerceIn(0, 1000) / 1000f * h
+
+        aiHistory.add("${a.type} (${a.x},${a.y}) ${a.reason}".trim())
+        while (aiHistory.size > 6) aiHistory.removeAt(0)
+        setStatus("${a.type}: ${a.reason}")
+
+        val path = Path().apply { moveTo(x, y) }
+        val duration: Long = when (a.type) {
+            "tap" -> 60L
+            "long_press" -> 900L
+            "swipe" -> {
+                if (a.x2 < 0 || a.y2 < 0) {
+                    60L
+                } else {
+                    path.lineTo(a.x2.coerceIn(0, 1000) / 1000f * w, a.y2.coerceIn(0, 1000) / 1000f * h)
+                    350L
+                }
+            }
+            else -> {
+                scheduleNextAi()
+                return
+            }
+        }
+
+        val gesture = GestureDescription.Builder()
+            .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
+            .build()
+        val next = Runnable { if (mySession == session) scheduleNextAi() }
         val ok = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(g: GestureDescription?) {
                 next.run()
