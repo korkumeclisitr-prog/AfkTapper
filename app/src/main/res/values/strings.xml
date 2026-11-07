@@ -1,0 +1,4 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="service_desc">Seçtiğin ekran noktalarına senin yerine otomatik dokunur. Ekranı okumaz, veri toplamaz, internete bağlanmaz.</string>
+</resources>

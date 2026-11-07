@@ -1,0 +1,156 @@
+package com.kaan.afktapper
+
+import android.app.Activity
+import android.app.AlertDialog
+import android.content.Context
+import android.content.Intent
+import android.graphics.Color
+import android.os.Bundle
+import android.provider.Settings
+import android.text.InputType
+import android.view.Gravity
+import android.widget.Button
+import android.widget.EditText
+import android.widget.LinearLayout
+import android.widget.ScrollView
+import android.widget.TextView
+import android.widget.Toast
+
+class MainActivity : Activity() {
+
+    private lateinit var status: TextView
+    private lateinit var interval: EditText
+    private lateinit var minutes: EditText
+
+    private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        val prefs = getSharedPreferences(TapService.PREFS, Context.MODE_PRIVATE)
+
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(dp(20), dp(48), dp(20), dp(24))
+        }
+
+        root.addView(TextView(this).apply {
+            text = "AFK Tapper"
+            textSize = 28f
+            setTextColor(Color.BLACK)
+        })
+        root.addView(TextView(this).apply {
+            text = "Ekranda seçtiğin noktalara senin yerine otomatik dokunur."
+            textSize = 15f
+            setPadding(0, dp(4), 0, dp(16))
+        })
+
+        status = TextView(this).apply {
+            textSize = 16f
+            setPadding(0, 0, 0, dp(8))
+        }
+        root.addView(status)
+
+        root.addView(Button(this).apply {
+            text = "1) Erişilebilirlik ayarlarını aç"
+            setOnClickListener {
+                startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            }
+        })
+        root.addView(TextView(this).apply {
+            text = "Listeden “AFK Tapper”ı bulup aç. Anahtar gri ve basılamıyorsa: " +
+                "Ayarlar → Uygulamalar → AFK Tapper → sağ üst ⋮ → " +
+                "“Kısıtlanmış ayarlara izin ver”, sonra tekrar dene."
+            textSize = 13f
+            setPadding(0, dp(4), 0, dp(16))
+        })
+
+        root.addView(label("Tıklama aralığı (milisaniye, en az 50)"))
+        interval = numberField(prefs.getLong(TapService.KEY_INTERVAL, 500L).toString())
+        root.addView(interval)
+
+        root.addView(label("Otomatik durma (dakika, 0 = kapalı)"))
+        minutes = numberField(prefs.getLong(TapService.KEY_MINUTES, 0L).toString())
+        root.addView(minutes)
+
+        root.addView(Button(this).apply {
+            text = "2) Başlat"
+            setOnClickListener { onStartPressed() }
+        }, LinearLayout.LayoutParams(
+            LinearLayout.LayoutParams.MATCH_PARENT,
+            LinearLayout.LayoutParams.WRAP_CONTENT
+        ).apply { topMargin = dp(20) })
+
+        root.addView(TextView(this).apply {
+            text = "Nasıl kullanılır:\n" +
+                "• Başlat'a bas, uyarıyı kabul et, oyuna geç.\n" +
+                "• Ekrandaki numaralı daireleri tıklanacak yerlere sürükle.\n" +
+                "• ＋ / － nokta ekler / çıkarır (en fazla 8). Noktalar sırayla tıklanır.\n" +
+                "• ▶ başlatır, ⏸ durdurur. ☰ ile paneli taşırsın, ✕ ile kapatırsın.\n" +
+                "• Çalışırken daireler soluklaşır ve dokunuşu engellemez."
+            textSize = 13f
+            gravity = Gravity.START
+            setPadding(0, dp(24), 0, 0)
+        })
+
+        setContentView(ScrollView(this).apply { addView(root) })
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (TapService.instance != null) {
+            status.text = "✅ Servis açık"
+            status.setTextColor(Color.parseColor("#1B8A3A"))
+        } else {
+            status.text = "❌ Servis kapalı — önce aşağıdan etkinleştir"
+            status.setTextColor(Color.parseColor("#C0392B"))
+        }
+    }
+
+    private fun label(t: String) = TextView(this).apply {
+        text = t
+        textSize = 14f
+        setPadding(0, dp(8), 0, 0)
+    }
+
+    private fun numberField(value: String) = EditText(this).apply {
+        inputType = InputType.TYPE_CLASS_NUMBER
+        setText(value)
+    }
+
+    private fun onStartPressed() {
+        val service = TapService.instance
+        if (service == null) {
+            Toast.makeText(this, "Önce erişilebilirlik servisini etkinleştir.", Toast.LENGTH_LONG).show()
+            startActivity(Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS))
+            return
+        }
+
+        val warning = "Bu uygulama ekrana senin yerine otomatik dokunur.\n\n" +
+            "Birçok oyun bot / otomasyon kullanımını şartlarında yasaklar. Hesabın askıya " +
+            "alınabilir veya kalıcı olarak yasaklanabilir.\n\n" +
+            "Uygulamanın geliştiricisi; hesap yasaklanması, banlanma, ilerleme / veri kaybı " +
+            "veya başka herhangi bir zarardan SORUMLU DEĞİLDİR. Tüm risk sana aittir. " +
+            "Kullanmadan önce oyunun kullanım şartlarını kontrol et.\n\n" +
+            "———\n" +
+            "This app taps the screen automatically. Many games forbid bots and may suspend " +
+            "or ban your account. The developer is not responsible for any ban, suspension, " +
+            "or loss. You use it at your own risk."
+
+        AlertDialog.Builder(this)
+            .setTitle("⚠️ Uyarı / Warning")
+            .setMessage(warning)
+            .setCancelable(false)
+            .setPositiveButton("Kabul ediyorum, başlat") { _, _ ->
+                val ms = (interval.text.toString().toLongOrNull() ?: 500L).coerceAtLeast(50L)
+                val min = (minutes.text.toString().toLongOrNull() ?: 0L).coerceAtLeast(0L)
+                getSharedPreferences(TapService.PREFS, Context.MODE_PRIVATE).edit()
+                    .putLong(TapService.KEY_INTERVAL, ms)
+                    .putLong(TapService.KEY_MINUTES, min)
+                    .apply()
+                service.showPanel()
+                moveTaskToBack(true)
+            }
+            .setNegativeButton("İptal", null)
+            .show()
+    }
+}
