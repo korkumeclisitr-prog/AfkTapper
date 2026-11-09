@@ -34,6 +34,7 @@ class MainActivity : Activity() {
     private lateinit var model: EditText
     private lateinit var goal: EditText
     private lateinit var step: EditText
+    private lateinit var actions: EditText
 
     private fun dp(v: Int) = (v * resources.displayMetrics.density).toInt()
 
@@ -123,9 +124,11 @@ class MainActivity : Activity() {
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_VARIATION_PASSWORD
         )
         aiBox.addView(apiKey)
-        aiBox.addView(label("Model (hata verirse ai.google.dev/gemini-api/docs/models'tan güncelle)"))
+        aiBox.addView(label("Model (hızlı: flash-lite. Hata verirse ai.google.dev/gemini-api/docs/models'tan güncelle)"))
+        val savedModel = prefs.getString(TapService.KEY_MODEL, TapService.DEFAULT_MODEL).orEmpty()
         model = textField(
-            prefs.getString(TapService.KEY_MODEL, TapService.DEFAULT_MODEL).orEmpty(),
+            // Eski varsayılan (yavaş) model otomatik olarak yenisiyle değişir.
+            if (savedModel == "gemini-3.6-flash") TapService.DEFAULT_MODEL else savedModel,
             TapService.DEFAULT_MODEL,
             InputType.TYPE_CLASS_TEXT
         )
@@ -137,9 +140,12 @@ class MainActivity : Activity() {
             InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE
         ).apply { minLines = 2 }
         aiBox.addView(goal)
-        aiBox.addView(label("Adımlar arası bekleme (milisaniye, en az 800)"))
-        step = numberField(prefs.getLong(TapService.KEY_STEP, 1500L).toString())
+        aiBox.addView(label("Adımlar arası bekleme (milisaniye, en az 300)"))
+        step = numberField(prefs.getLong(TapService.KEY_STEP, 700L).toString())
         aiBox.addView(step)
+        aiBox.addView(label("Tek seferde en fazla hamle (1-5, yüksek = daha hızlı ama daha riskli)"))
+        actions = numberField(prefs.getInt(TapService.KEY_ACTIONS, 3).toString())
+        aiBox.addView(actions)
         root.addView(aiBox)
 
         // ---- Ortak ----
@@ -254,12 +260,14 @@ class MainActivity : Activity() {
             .setCancelable(false)
             .setPositiveButton("Kabul ediyorum, başlat") { _, _ ->
                 val ms = (interval.text.toString().toLongOrNull() ?: 500L).coerceAtLeast(50L)
-                val stepMs = (step.text.toString().toLongOrNull() ?: 1500L).coerceAtLeast(800L)
+                val stepMs = (step.text.toString().toLongOrNull() ?: 700L).coerceAtLeast(300L)
+                val maxActs = (actions.text.toString().toIntOrNull() ?: 3).coerceIn(1, 5)
                 val min = (minutes.text.toString().toLongOrNull() ?: 0L).coerceAtLeast(0L)
                 getSharedPreferences(TapService.PREFS, Context.MODE_PRIVATE).edit()
                     .putString(TapService.KEY_MODE, if (ai) "ai" else "points")
                     .putLong(TapService.KEY_INTERVAL, ms)
                     .putLong(TapService.KEY_STEP, stepMs)
+                    .putInt(TapService.KEY_ACTIONS, maxActs)
                     .putLong(TapService.KEY_MINUTES, min)
                     .putString(TapService.KEY_API, apiKey.text.toString().trim())
                     .putString(TapService.KEY_MODEL, model.text.toString().trim())

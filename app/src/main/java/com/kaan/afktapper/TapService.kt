@@ -44,7 +44,8 @@ class TapService : AccessibilityService() {
         const val KEY_MODEL = "model"
         const val KEY_GOAL = "goal"
         const val KEY_STEP = "step_ms"
-        const val DEFAULT_MODEL = "gemini-3.6-flash"
+        const val KEY_ACTIONS = "max_actions"
+        const val DEFAULT_MODEL = "gemini-3.5-flash-lite"
     }
 
     private val handler = Handler(Looper.getMainLooper())
@@ -375,7 +376,7 @@ class TapService : AccessibilityService() {
         handler.post(aiRunnable)
     }
 
-    private fun stepDelay() = prefs().getLong(KEY_STEP, 1500L).coerceAtLeast(800L)
+    private fun stepDelay() = prefs().getLong(KEY_STEP, 700L).coerceAtLeast(300L)
 
     private fun scheduleNextAi() {
         if (running) handler.postDelayed(aiRunnable, stepDelay())
@@ -425,19 +426,22 @@ class TapService : AccessibilityService() {
         val model = p.getString(KEY_MODEL, DEFAULT_MODEL).orEmpty().trim().ifEmpty { DEFAULT_MODEL }
         val goal = p.getString(KEY_GOAL, "").orEmpty().trim()
             .ifEmpty { "Progress in the game: complete objectives, collect rewards, fight enemies." }
+        val maxActions = p.getInt(KEY_ACTIONS, 3).coerceIn(1, 5)
         val history = aiHistory.toList()
         val w = bmp.width
         val h = bmp.height
-        setStatus("Gemini düşünüyor…")
+        setStatus("Gemini bakıyor…")
 
         worker.execute {
-            val result = runCatching { GeminiClient.nextAction(key, model, goal, history, bmp) }
+            val result = runCatching {
+                GeminiClient.nextActions(key, model, goal, history, bmp, maxActions)
+            }
             bmp.recycle()
             handler.post { handleAiResult(result, w, h, mySession) }
         }
     }
 
-    private fun handleAiResult(result: Result<AiAction>, w: Int, h: Int, mySession: Int) {
+    private fun handleAiResult(result: Result<List<AiAction>>, w: Int, h: Int, mySession: Int) {
         if (!running || mySession != session) return
         val err = result.exceptionOrNull()
         if (err != null) {
@@ -448,7 +452,7 @@ class TapService : AccessibilityService() {
             return
         }
         aiErrors = 0
-        performAi(result.getOrThrow(), w, h, mySession)
+        performAiActions(result.getOrThrow(), 0, w, h, mySession)
     }
 
     private fun aiFail(msg: String, fatal: Boolean, retryDelay: Long) {
@@ -463,7 +467,27 @@ class TapService : AccessibilityService() {
         if (running) handler.postDelayed(aiRunnable, retryDelay)
     }
 
-    private fun performAi(a: AiAction, w: Int, h: Int, mySession: Int) {
+    /** Gemini'nin döndürdüğü hamleleri sırayla uygular; hepsi bitince yeni ekran görüntüsü alır. */
+    private fun performAiActions(list: List<AiAction>, i: Int, w: Int, h: Int, mySession: Int) {
+        if (!running || mySession != session) return
+        if (i >= list.size) {
+            scheduleNextAi()
+            return
+        }
+        val a = list[i]
+        if (a.type == "wait") {
+            aiHistory.add("wait ${a.reason}".trim())
+            while (aiHistory.size > 6) aiHistory.removeAt(0)
+            setStatus("bekle: ${a.reason}")
+            scheduleNextAi()
+            return
+        }
+        performAi(a, w, h, mySession) {
+            handler.postDelayed({ performAiActions(list, i + 1, w, h, mySession) }, 300L)
+        }
+    }
+
+    private fun performAi(a: AiAction, w: Int, h: Int, mySession: Int, done: () -> Unit) {
         val x = a.x.coerceIn(0, 1000) / 1000f * w
         val y = a.y.coerceIn(0, 1000) / 1000f * h
 
@@ -484,7 +508,7 @@ class TapService : AccessibilityService() {
                 }
             }
             else -> {
-                scheduleNextAi()
+                done()
                 return
             }
         }
@@ -492,7 +516,7 @@ class TapService : AccessibilityService() {
         val gesture = GestureDescription.Builder()
             .addStroke(GestureDescription.StrokeDescription(path, 0, duration))
             .build()
-        val next = Runnable { if (mySession == session) scheduleNextAi() }
+        val next = Runnable { if (mySession == session) done() }
         val ok = dispatchGesture(gesture, object : GestureResultCallback() {
             override fun onCompleted(g: GestureDescription?) {
                 next.run()
