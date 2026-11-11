@@ -1,4 +1,4 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="service_desc">Senin yerine ekrana otomatik dokunur. Sabit nokta modunda ekranı okumaz ve internete bağlanmaz. AI modunu sen açarsan, her adımda ekranın görüntüsünü alıp senin girdiğin API anahtarıyla Google Gemini\'ye gönderir.</string>
+    <string name="service_desc">Senin yerine ekrana dokunur ve sürükler. Sabit nokta modunda ekranı okumaz ve internete bağlanmaz. AI modunu sen açarsan, her adımda ekranın görüntüsünü alıp senin girdiğin API anahtarıyla Google Gemini\'ye gönderir.</string>
 </resources>

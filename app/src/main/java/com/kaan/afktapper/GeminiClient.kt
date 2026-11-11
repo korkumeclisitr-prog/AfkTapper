@@ -3,6 +3,7 @@ package com.kaan.afktapper
 import android.graphics.Bitmap
 import android.util.Base64
 import org.json.JSONArray
+import org.json.JSONException
 import org.json.JSONObject
 import java.io.ByteArrayOutputStream
 import java.net.HttpURLConnection
@@ -22,7 +23,9 @@ data class AiAction(
 
 object GeminiClient {
 
-    /** Ağ çağrısı yapar; arka plan thread'inde çağır. Tek çağrıda 1..maxActions hamle döner. */
+    // ---------- Genel mod: ekrana bak, 1..maxActions hamle seç ----------
+
+    /** Ağ çağrısı yapar; arka plan thread'inde çağır. */
     fun nextActions(
         apiKey: String,
         model: String,
@@ -33,36 +36,99 @@ object GeminiClient {
     ): List<AiAction> {
         val parts = JSONArray()
             .put(JSONObject().put("text", buildPrompt(goal, history, maxActions)))
-            .put(JSONObject().put("inline_data", JSONObject()
-                .put("mime_type", "image/jpeg")
-                .put("data", encode(shot))))
-
-        val thinking = thinkingConfig(model)
-        var result = post(apiKey, model, bodyOf(parts, thinking))
-        // Düşünme ayarını model kabul etmediyse ayarsız tekrar dene.
-        if (result.first == 400 && thinking != null) {
-            result = post(apiKey, model, bodyOf(parts, null))
+            .put(imagePart(shot, 768, 60))
+        val text = call(apiKey, model, parts, "minimal", 400, 0.2)
+        try {
+            val raw = JsonText.clean(text)
+            val arr = if (raw.startsWith("[")) {
+                JSONArray(raw)
+            } else {
+                val o = JSONObject(raw)
+                o.optJSONArray("actions") ?: JSONArray().put(o)
+            }
+            val list = JsonText.actions(arr, maxActions)
+            if (list.isEmpty()) throw GeminiException(0, "Gemini yanıtında eylem yok")
+            return list
+        } catch (e: JSONException) {
+            throw GeminiException(0, "Gemini yanıtı okunamadı")
         }
-        val (code, text) = result
-        if (code !in 200..299) throw GeminiException(code, errorMessage(text, code))
-        return parse(text, maxActions)
     }
 
-    private fun thinkingConfig(model: String): JSONObject? {
+    // ---------- Bulmaca modu: sadece tahtayı ve parçaları oku, hamleyi cihazdaki çözücü seçer ----------
+
+    private const val PUZZLE_PROMPT = """This is a screenshot of an Android game. Describe it. Do NOT choose any move.
+
+If it is a block-puzzle play screen (a square grid board with a tray of block pieces below it, like Block Blast), reply:
+{"screen":"game","board":{"left":N,"top":N,"right":N,"bottom":N,"cells":["........", "..##....", ...]},"pieces":[{"cx":N,"cy":N,"shape":["##","#."]}]}
+
+Rules:
+- All numbers (left, top, right, bottom, cx, cy) are coordinates relative to the screenshot on a 0-1000 scale: (0,0) is the top-left corner, (1000,1000) the bottom-right corner.
+- board.left/top/right/bottom are the outer edges of the playable cell grid only (not the decorative frame, score, or background).
+- cells: one string per grid row from top to bottom, one character per cell: '#' = the cell contains a block (any color), '.' = the cell is empty. Look at every cell carefully. Usually the grid is 8 rows of 8 characters. All rows must have the same length.
+- pieces: every block piece currently waiting in the tray, from left to right. Ignore empty tray slots and pieces that are being dragged. shape = the piece's tight bounding box, one string per row, '#' for filled and '.' for empty, with no empty rows or columns at the edges. cx,cy = the center of that bounding box on the screen.
+
+If the screen is NOT the playable board (menu, ad, game over, reward or other popup), reply instead:
+{"screen":"other","actions":[{"action":"tap","x":N,"y":N,"reason":"max 5 words"}]}
+and choose the single best tap to get back to playing: close an ad with its X button, or tap Play again / Continue / Claim / OK. Never buy anything, subscribe, or open a payment dialog. Use {"action":"wait"} if the screen is loading or an animation is playing.
+
+Reply with JSON only."""
+
+    /** Ağ çağrısı yapar; arka plan thread'inde çağır. */
+    fun readPuzzle(apiKey: String, model: String, shot: Bitmap): PuzzleRead {
+        val parts = JSONArray()
+            .put(JSONObject().put("text", PUZZLE_PROMPT))
+            .put(imagePart(shot, 1024, 80))
+        val text = call(apiKey, model, parts, "low", 4096, 0.1)
+        try {
+            return PuzzleParser.parse(text)
+        } catch (e: JSONException) {
+            throw GeminiException(0, "Gemini yanıtı okunamadı")
+        }
+    }
+
+    // ---------- Ortak ----------
+
+    private fun call(
+        apiKey: String,
+        model: String,
+        parts: JSONArray,
+        level: String,
+        maxTokens: Int,
+        temperature: Double
+    ): String {
+        val thinking = thinkingConfig(model, level)
+        var result = post(apiKey, model, bodyOf(parts, thinking, maxTokens, temperature))
+        // Düşünme ayarını model kabul etmediyse ayarsız tekrar dene.
+        if (result.first == 400 && thinking != null) {
+            result = post(apiKey, model, bodyOf(parts, null, maxTokens, temperature))
+        }
+        val (code, body) = result
+        if (code !in 200..299) throw GeminiException(code, errorMessage(body, code))
+        return extractText(body)
+    }
+
+    private fun thinkingConfig(model: String, level: String): JSONObject? {
         val m = model.lowercase()
         return when {
             "pro" in m -> null
-            "2.5" in m -> JSONObject().put("thinkingBudget", 0)
-            "gemini-3" in m -> JSONObject().put("thinkingLevel", "minimal")
+            "2.5" in m -> JSONObject().put(
+                "thinkingBudget",
+                when (level) {
+                    "minimal" -> 0
+                    "low" -> 1024
+                    else -> 4096
+                }
+            )
+            "gemini-3" in m -> JSONObject().put("thinkingLevel", level)
             else -> null
         }
     }
 
-    private fun bodyOf(parts: JSONArray, thinking: JSONObject?): JSONObject {
+    private fun bodyOf(parts: JSONArray, thinking: JSONObject?, maxTokens: Int, temperature: Double): JSONObject {
         val gen = JSONObject()
             .put("responseMimeType", "application/json")
-            .put("temperature", 0.2)
-            .put("maxOutputTokens", 400)
+            .put("temperature", temperature)
+            .put("maxOutputTokens", maxTokens)
         if (thinking != null) gen.put("thinkingConfig", thinking)
         return JSONObject()
             .put("contents", JSONArray().put(JSONObject().put("parts", parts)))
@@ -75,7 +141,7 @@ object GeminiClient {
         try {
             conn.requestMethod = "POST"
             conn.connectTimeout = 10_000
-            conn.readTimeout = 40_000
+            conn.readTimeout = 60_000
             conn.doOutput = true
             conn.setRequestProperty("Content-Type", "application/json")
             conn.setRequestProperty("x-goog-api-key", apiKey)
@@ -87,6 +153,27 @@ object GeminiClient {
         } finally {
             conn.disconnect()
         }
+    }
+
+    private fun extractText(body: String): String {
+        val parts = try {
+            JSONObject(body).optJSONArray("candidates")
+                ?.optJSONObject(0)
+                ?.optJSONObject("content")
+                ?.optJSONArray("parts")
+        } catch (e: JSONException) {
+            null
+        } ?: throw GeminiException(0, "Gemini boş yanıt döndürdü (içerik filtresine takılmış olabilir)")
+
+        val sb = StringBuilder()
+        for (i in 0 until parts.length()) {
+            val part = parts.optJSONObject(i) ?: continue
+            if (part.optBoolean("thought", false)) continue
+            sb.append(part.optString("text", ""))
+        }
+        val raw = sb.toString().trim()
+        if (raw.isEmpty()) throw GeminiException(0, "Gemini yanıtı boş geldi")
+        return raw
     }
 
     private fun buildPrompt(goal: String, history: List<String>, maxActions: Int): String {
@@ -120,8 +207,15 @@ object GeminiClient {
         return sb.toString()
     }
 
-    private fun encode(src: Bitmap): String {
-        val maxSide = 768
+    private fun imagePart(src: Bitmap, maxSide: Int, quality: Int): JSONObject =
+        JSONObject().put(
+            "inline_data",
+            JSONObject()
+                .put("mime_type", "image/jpeg")
+                .put("data", encode(src, maxSide, quality))
+        )
+
+    private fun encode(src: Bitmap, maxSide: Int, quality: Int): String {
         val scale = maxSide.toFloat() / maxOf(src.width, src.height)
         val bmp = if (scale < 1f) {
             Bitmap.createScaledBitmap(
@@ -132,57 +226,9 @@ object GeminiClient {
             )
         } else src
         val out = ByteArrayOutputStream()
-        bmp.compress(Bitmap.CompressFormat.JPEG, 60, out)
+        bmp.compress(Bitmap.CompressFormat.JPEG, quality, out)
         if (bmp !== src) bmp.recycle()
         return Base64.encodeToString(out.toByteArray(), Base64.NO_WRAP)
-    }
-
-    private fun parse(text: String, maxActions: Int): List<AiAction> {
-        val root = JSONObject(text)
-        val parts = root.optJSONArray("candidates")
-            ?.optJSONObject(0)
-            ?.optJSONObject("content")
-            ?.optJSONArray("parts")
-            ?: throw GeminiException(0, "Gemini boş yanıt döndürdü (içerik filtresine takılmış olabilir)")
-
-        val sb = StringBuilder()
-        for (i in 0 until parts.length()) {
-            val part = parts.optJSONObject(i) ?: continue
-            if (part.optBoolean("thought", false)) continue
-            sb.append(part.optString("text", ""))
-        }
-        val raw = sb.toString().trim()
-            .removePrefix("```json").removePrefix("```").removeSuffix("```").trim()
-        if (raw.isEmpty()) throw GeminiException(0, "Gemini yanıtında eylem yok")
-
-        val arr: JSONArray = try {
-            when {
-                raw.startsWith("[") -> JSONArray(raw)
-                else -> {
-                    val obj = JSONObject(raw)
-                    obj.optJSONArray("actions") ?: JSONArray().put(obj)
-                }
-            }
-        } catch (e: Exception) {
-            throw GeminiException(0, "Gemini yanıtı okunamadı")
-        }
-
-        val list = ArrayList<AiAction>()
-        for (i in 0 until minOf(arr.length(), maxActions.coerceAtLeast(1))) {
-            val o = arr.optJSONObject(i) ?: continue
-            list.add(
-                AiAction(
-                    type = o.optString("action", "wait").trim().lowercase(),
-                    x = o.optInt("x", 500),
-                    y = o.optInt("y", 500),
-                    x2 = o.optInt("x2", -1),
-                    y2 = o.optInt("y2", -1),
-                    reason = o.optString("reason", "").take(60)
-                )
-            )
-        }
-        if (list.isEmpty()) throw GeminiException(0, "Gemini yanıtında eylem yok")
-        return list
     }
 
     private fun errorMessage(body: String, code: Int): String {

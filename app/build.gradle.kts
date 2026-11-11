@@ -11,8 +11,8 @@ android {
         applicationId = "com.kaan.afktapper"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0"
+        versionCode = 3
+        versionName = "1.2"
     }
 
     buildTypes {
@@ -30,4 +30,10 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+}
+
+dependencies {
+    testImplementation("junit:junit:4.13.2")
+    // Birim testlerinde gerçek org.json (android.jar'daki taslak yerine).
+    testImplementation("org.json:json:20240303")
 }

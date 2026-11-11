@@ -29,6 +29,16 @@ Android Studio ile derlemek istersen klasörü açıp **Build → Build APK(s)**
   API anahtarını her kullanıcı kendi girer, cihazda saklanır. Anahtarı APK'ya gömme.
   Her adım yaklaşık 2-5 sn sürer: sıra tabanlı, idle ve yavaş oyunlara uygundur, hızlı
   aksiyon oyunlarına değil. Güvenlik bayraklı (FLAG_SECURE) oyunlarda ekran görüntüsü siyah gelir.
+- **Block Blast / bulmaca modu:** Gemini sadece tahtayı (8x8 hücre) ve tepsideki parçaları
+  okur (JSON). En iyi yerleşimi cihazdaki çözücü (`BlockSolver`) hesaplar: önce tüm parçaları
+  yerleştirmeyi, sonra satır/sütun temizlemeyi, sonra tahtanın düzenini (kuyu, kenar) önceler.
+  Parçalar sürükleyerek yerleştirilir. Parça hedefin hep bir miktar yukarısına/aşağısına
+  düşüyorsa Gelişmiş ayarlardan "Sürükleme kayması"nı ayarla. Reklam / oyun bitti ekranlarında
+  Gemini devam butonuna basar.
+- **Baloncuk:** kontrol paneli ekranın her yerine sürüklenir, dokununca açılır/küçülür,
+  konumu hatırlanır.
+- Çözücü ve JSON ayrıştırıcı `app/src/test` altında JUnit ile test edilir; GitHub Actions
+  her gönderimde testleri çalıştırır.
 - AI modu kullanan uygulamanın itch.io açıklamasında, ekran görüntülerinin Google'a
   gönderildiğini açıkça yaz.
 - Release APK, yan yükleme için debug anahtarıyla imzalanır. Kendi anahtarınla imzalamak
