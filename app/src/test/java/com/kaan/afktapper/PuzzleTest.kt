@@ -60,10 +60,21 @@ class PuzzleTest {
 
     @Test
     fun placesAsManyPiecesAsPossible() {
-        // Sadece 1 hücre boş: 1x1 parça sığar, 2x2 sığmaz.
-        val rows = List(8) { i -> if (i == 3) "####.###" else "########" }
+        // Dama tahtası: boş hücreler tek tek, hiçbir satır/sütun tamamlanmıyor.
+        // 1x1 parça sığar, 2x2 hiçbir yere sığmaz.
+        val rows = List(8) { i -> if (i % 2 == 0) "#.#.#.#." else ".#.#.#.#" }
         val plan = BlockSolver.plan(grid(*rows.toTypedArray()), listOf(grid("##", "##"), grid("#")))
         assertEquals(1, plan.placements.size)
+        assertEquals(1, plan.placements[0].pieceIndex)
+        assertEquals(0, plan.lines)
+    }
+
+    @Test
+    fun clearsWholeBoardThenPlacesNext() {
+        // Tek boşluk: 1x1 koyunca tüm tahta temizlenir, sonra 2x2 de sığar (2 parça).
+        val rows = List(8) { i -> if (i == 3) "####.###" else "########" }
+        val plan = BlockSolver.plan(grid(*rows.toTypedArray()), listOf(grid("##", "##"), grid("#")))
+        assertEquals(2, plan.placements.size)
         assertEquals(1, plan.placements[0].pieceIndex)
         assertEquals(3, plan.placements[0].row)
         assertEquals(4, plan.placements[0].col)
@@ -90,7 +101,8 @@ class PuzzleTest {
     fun geometryMapsCellsToScreen() {
         // Tahta 100..900 arası, 8 sütun => hücre 100 birim.
         assertEquals(150f, PuzzleGeometry.targetX(100f, 900f, 8, 0, 1), 0.001f)
-        assertEquals(300f, PuzzleGeometry.targetX(100f, 900f, 8, 1, 3), 0.001f)
+        // 3 sütunluk parça 1. sütunda: 100 + 100 * (1 + 1.5) = 350.
+        assertEquals(350f, PuzzleGeometry.targetX(100f, 900f, 8, 1, 3), 0.001f)
         // Tahta 200..1000 arası, 8 satır => hücre 100 birim; 3 satırlık parça 0. satırda: 200 + 1.5*100.
         assertEquals(350f, PuzzleGeometry.targetY(200f, 1000f, 8, 0, 3), 0.001f)
     }
